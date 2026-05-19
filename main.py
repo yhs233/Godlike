@@ -268,33 +268,73 @@ def login_with_browser(user: str, pwd: str, proxy: str = None) -> Optional[Dict]
             browser.close()
 
 # ---------- 续期操作 ----------
-def do_renewal(page, server_short_id: str) -> bool:
+def do_renewal(page, server_short_id: str, max_retries: int = 3) -> bool:
     url = f"{API_BASE}/server/{server_short_id}"
-    try:
-        page.goto(url, wait_until="domcontentloaded")
-        page.wait_for_timeout(3000)
+    for attempt in range(1, max_retries + 1):
+        try:
+            if attempt == 1:
+                print("[INFO] 访问服务器页面...", flush=True)
+                page.goto(url, wait_until="domcontentloaded")
+            else:
+                print(f"[INFO] 第{attempt}次重试，刷新页面...", flush=True)
+                page.reload(wait_until="domcontentloaded")
 
-        page.locator('button:has-text("Add 90 minutes")').wait_for(state="visible", timeout=30000)
-        page.locator('button:has-text("Add 90 minutes")').click()
-        print("[INFO] 已点击 Add 90 minutes", flush=True)
+            page.wait_for_timeout(5000)  # 多等一会儿，让框架错误消失
 
-        page.locator('button:has-text("Watch advertisment")').wait_for(state="visible", timeout=10000)
-        page.locator('button:has-text("Watch advertisment")').click()
-        print("[INFO] 已点击 Watch advertisment", flush=True)
+            # 检查是否仍然有前端错误
+            error_selectors = [
+                'text="An error was encountered"',
+                'text="error was encountered"',
+                'text="Try refreshing the page"'
+            ]
+            has_error = False
+            for sel in error_selectors:
+                loc = page.locator(sel)
+                if loc.count() > 0:
+                    print(f"[WARN] 检测到页面错误: {sel}，将重试...", flush=True)
+                    has_error = True
+                    break
 
-        print("[INFO] 等待广告 120 秒...", flush=True)
-        time.sleep(120)
-        page.reload(wait_until="domcontentloaded")
-        page.wait_for_timeout(3000)
-        return True
-    except PlaywrightTimeoutError:
-        print("[ERROR] 续期按钮未出现", flush=True)
-        page.screenshot(path=snapshot("renewal_not_found"))
-        return False
-    except Exception as e:
-        print(f"[ERROR] 续期异常: {e}", flush=True)
-        page.screenshot(path=snapshot("renewal_error"))
-        return False
+            if has_error and attempt < max_retries:
+                continue      # 再试下一次
+            elif has_error and attempt == max_retries:
+                print("[ERROR] 多次重试后页面仍存在错误", flush=True)
+                page.screenshot(path=snapshot("renewal_page_error"))
+                return False
+
+            # 页面正常，等待续期按钮
+            add_btn = page.locator('button:has-text("Add 90 minutes")')
+            add_btn.wait_for(state="visible", timeout=30000)
+            add_btn.click()
+            print("[INFO] 已点击 Add 90 minutes", flush=True)
+
+            ad_btn = page.locator('button:has-text("Watch advertisment")')
+            ad_btn.wait_for(state="visible", timeout=10000)
+            ad_btn.click()
+            print("[INFO] 已点击 Watch advertisment", flush=True)
+
+            print("[INFO] 等待广告 120 秒...", flush=True)
+            time.sleep(120)
+
+            # 广告结束后刷新页面，获取最新时间
+            page.reload(wait_until="domcontentloaded")
+            page.wait_for_timeout(3000)
+            return True
+
+        except PlaywrightTimeoutError:
+            print(f"[ERROR] 第{attempt}次：续期按钮未出现（可能页面错误或网络问题）", flush=True)
+            if attempt < max_retries:
+                continue
+            page.screenshot(path=snapshot("renewal_not_found"))
+            return False
+        except Exception as e:
+            print(f"[ERROR] 续期异常 (重试{attempt}): {e}", flush=True)
+            if attempt < max_retries:
+                continue
+            page.screenshot(path=snapshot("renewal_error"))
+            return False
+
+    return False
 
 # ---------- 单账号流程 ----------
 def process_account(key: str, proxy: str = None) -> bool:
